@@ -446,7 +446,6 @@ pub(super) fn uploaded(f: &Fixture) -> u64 {
     f.handle.live().map_or(0, |l| l.get_uploaded_bytes())
 }
 
-// The harness itself: a session serves the blocks a wire-level peer asks for.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fake_peer_downloads_a_block_from_a_seeder() -> anyhow::Result<()> {
     run(async {
@@ -458,6 +457,14 @@ async fn test_fake_peer_downloads_a_block_from_a_seeder() -> anyhow::Result<()> 
         let pieces = peer.expect_pieces(1, Duration::from_secs(10)).await?;
         assert_eq!((pieces[0].0, pieces[0].1), (1, BLOCK));
         assert_eq!(pieces[0].2, seed.block(1, BLOCK, BLOCK));
+        // The receiver can run before post-write accounting.
+        timeout(Duration::from_secs(5), async {
+            while uploaded(&seed) < BLOCK as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .context("upload accounting did not catch up")?;
         assert_eq!(uploaded(&seed), BLOCK as u64);
         Ok(())
     })
