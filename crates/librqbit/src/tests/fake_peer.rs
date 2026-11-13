@@ -322,6 +322,7 @@ impl Fixture {
 #[derive(Default)]
 pub(super) struct SeederOpts {
     pub(super) upload_bps: Option<u32>,
+    pub(super) disable_peer_exchange: bool,
 }
 
 fn loopback_listener() -> ListenerOptions {
@@ -355,6 +356,7 @@ pub(super) async fn start_seeder(opts: SeederOpts) -> anyhow::Result<Fixture> {
             listen: Some(loopback_listener()),
             ipv4_only: true,
             disable_local_service_discovery: true,
+            disable_peer_exchange: opts.disable_peer_exchange,
             ratelimits: LimitsConfig {
                 upload_bps: opts.upload_bps.and_then(NonZeroU32::new),
                 download_bps: None,

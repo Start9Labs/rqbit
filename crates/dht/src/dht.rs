@@ -572,6 +572,7 @@ impl<C: RecursiveRequestCallbacks> RecursiveRequest<C> {
 
 pub struct DhtState {
     id: Id20,
+    client_only: bool,
     next_transaction_id: AtomicU16,
 
     // Created requests: (transaction_id, addr) => Requests.
@@ -596,16 +597,19 @@ impl DhtState {
     fn new_internal(
         id: Id20,
         sender: UnboundedSender<WorkerSendRequest>,
-        routing_table_v4: Option<RoutingTable>,
-        routing_table_v6: Option<RoutingTable>,
         listen_addr: SocketAddr,
-        peer_store: PeerStore,
         cancellation_token: CancellationToken,
+        config: DhtConfig<'_>,
     ) -> Self {
-        let routing_table_v4 = routing_table_v4.unwrap_or_else(|| RoutingTable::new(id, None));
-        let routing_table_v6 = routing_table_v6.unwrap_or_else(|| RoutingTable::new(id, None));
+        let routing_table_v4 = config
+            .routing_table
+            .unwrap_or_else(|| RoutingTable::new(id, None));
+        let routing_table_v6 = config
+            .routing_table_v6
+            .unwrap_or_else(|| RoutingTable::new(id, None));
         Self {
             id,
+            client_only: config.client_only,
             next_transaction_id: AtomicU16::new(0),
             inflight_by_transaction_id: Default::default(),
             routing_table_v4: RwLock::new(routing_table_v4),
@@ -613,7 +617,7 @@ impl DhtState {
             worker_sender: sender,
             listen_addr,
             rate_limiter: make_rate_limiter(),
-            peer_store,
+            peer_store: config.peer_store.unwrap_or_else(|| PeerStore::new(id)),
             cancellation_token,
         }
     }
@@ -810,6 +814,9 @@ impl DhtState {
             _ => {}
         };
 
+        if self.client_only {
+            return Ok(());
+        }
         trace!("received query from {addr}: {msg:?}");
 
         match &msg.kind {
@@ -1298,6 +1305,8 @@ impl DhtWorker {
 
 #[derive(Default)]
 pub struct DhtConfig<'a> {
+    /// Makes outgoing queries without serving incoming queries or relaying stored addresses.
+    pub client_only: bool,
     pub peer_id: Option<Id20>,
     pub bootstrap_addrs: Option<Vec<String>>,
     pub routing_table: Option<RoutingTable>,
@@ -1341,6 +1350,7 @@ impl DhtState {
             info!("starting up DHT with peer id {:?}", peer_id);
             let bootstrap_addrs = config
                 .bootstrap_addrs
+                .take()
                 .unwrap_or_else(|| crate::DHT_BOOTSTRAP.iter().map(|v| v.to_string()).collect());
 
             let token = config.cancellation_token.take().unwrap_or_default();
@@ -1349,11 +1359,9 @@ impl DhtState {
             let state = Arc::new(Self::new_internal(
                 peer_id,
                 in_tx,
-                config.routing_table,
-                config.routing_table_v6,
                 listen_addr,
-                config.peer_store.unwrap_or_else(|| PeerStore::new(peer_id)),
                 token,
+                config,
             ));
 
             spawn_with_cancel(
@@ -1430,11 +1438,90 @@ mod tests {
     use bencode::ByteBufOwned;
     use tokio::net::UdpSocket;
 
-    use super::{DhtConfig, DhtState};
+    use super::{
+        AnnouncePeer, DhtConfig, DhtState, GetPeersRequest, Id20, Message, OutstandingRequest,
+        Response, ResponseOrError, Want,
+    };
     use crate::{
         Dht,
         bprotocol::{self, MessageKind},
     };
+    use std::sync::Arc;
+    use tokio::sync::mpsc::unbounded_channel;
+    use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn client_only_does_not_redistribute_addresses_but_accepts_query_responses() {
+        let id = Id20::new([0; 20]);
+        let private_peer: SocketAddr = "192.168.1.7:6881".parse().unwrap();
+        let recipient: SocketAddr = "203.0.113.10:6881".parse().unwrap();
+        let (tx, mut rx) = unbounded_channel();
+        let state = Arc::new(DhtState::new_internal(
+            id,
+            tx,
+            "127.0.0.1:0".parse().unwrap(),
+            CancellationToken::new(),
+            DhtConfig {
+                client_only: true,
+                ..Default::default()
+            },
+        ));
+        let token = state.peer_store.gen_token_for(id, private_peer);
+        assert!(state.peer_store.store_peer(
+            &AnnouncePeer {
+                id,
+                info_hash: id,
+                implied_port: 0,
+                port: 6881,
+                token: ByteBufOwned::from(token.as_slice()),
+            },
+            private_peer
+        ));
+        assert_eq!(state.peer_store.get_for_info_hash(id, Want::V4).len(), 1);
+        state
+            .on_received_message(
+                Message {
+                    transaction_id: ByteBufOwned::from(&b"aa"[..]),
+                    version: None,
+                    ip: None,
+                    kind: MessageKind::GetPeersRequest(GetPeersRequest {
+                        id,
+                        info_hash: id,
+                        want: Some(Want::V4),
+                    }),
+                },
+                recipient,
+            )
+            .unwrap();
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let (done, mut response) = tokio::sync::oneshot::channel();
+        state.inflight_by_transaction_id.insert(
+            (u16::from_be_bytes(*b"aa"), recipient),
+            OutstandingRequest { done },
+        );
+        state
+            .on_received_message(
+                Message {
+                    transaction_id: ByteBufOwned::from(&b"aa"[..]),
+                    version: None,
+                    ip: None,
+                    kind: MessageKind::Response(Response {
+                        id,
+                        ..Default::default()
+                    }),
+                },
+                recipient,
+            )
+            .unwrap();
+        assert!(matches!(
+            response.try_recv().unwrap().unwrap(),
+            ResponseOrError::Response(_)
+        ));
+    }
 
     async fn start_dht(bootstrap_addr: SocketAddr) -> Dht {
         DhtState::with_config(DhtConfig {

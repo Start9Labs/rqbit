@@ -34,4 +34,4 @@ librqbit-dualstack-sockets.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt"] }

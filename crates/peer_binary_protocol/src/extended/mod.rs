@@ -26,7 +26,9 @@ use super::MY_EXTENDED_UT_METADATA;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub struct PeerExtendedMessageIds {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ut_metadata: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ut_pex: Option<u8>,
 }
 
