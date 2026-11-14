@@ -997,6 +997,7 @@ impl TorrentStateLive {
 // BEP 11 caps each added/dropped list at 50 peers.
 const PEX_PEER_LIMIT: usize = 50;
 
+/// Local peer addresses reach only local recipients.
 fn pex_peers_for(
     recipient: IpAddr,
     peers: impl Iterator<Item = SocketAddr>,

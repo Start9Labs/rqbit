@@ -401,7 +401,7 @@ impl SessionPersistenceConfig {
 /// Configuration for the DHT subsystem.
 /// Set to `None` in `SessionOptions::dht` to disable DHT entirely.
 pub struct DhtSessionConfig {
-    /// Queries DHT peers without serving queries or redistributing learned addresses.
+    /// Runs the DHT as a BEP 43 read-only node.
     pub client_only: bool,
     /// Bootstrap nodes (host:port or ip:port). Uses built-in defaults if None.
     pub bootstrap_addrs: Option<Vec<String>>,
