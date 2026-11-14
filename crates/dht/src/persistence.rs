@@ -109,6 +109,27 @@ impl PersistentDht {
         cancellation_token: Option<CancellationToken>,
         bind_device: Option<&'a BindDevice>,
     ) -> BoxFuture<'a, anyhow::Result<Dht>> {
+        Self::create_with_query_mode(
+            persistence_config,
+            port,
+            ipv4_only,
+            bootstrap_addrs,
+            cancellation_token,
+            bind_device,
+            false,
+        )
+    }
+
+    /// Restores persistent state without serving incoming queries when client-only.
+    pub fn create_with_query_mode<'a>(
+        persistence_config: DhtPersistenceConfig,
+        port: Option<u16>,
+        ipv4_only: bool,
+        bootstrap_addrs: Option<Vec<String>>,
+        cancellation_token: Option<CancellationToken>,
+        bind_device: Option<&'a BindDevice>,
+        client_only: bool,
+    ) -> BoxFuture<'a, anyhow::Result<Dht>> {
         async move {
             let config_filename = match persistence_config.config_filename {
                 Some(f) => f,
@@ -161,6 +182,7 @@ impl PersistentDht {
             let peer_id = routing_table.as_ref().map(|r| r.id());
 
             let dht_config = DhtConfig {
+                client_only,
                 peer_id,
                 bootstrap_addrs,
                 routing_table,

@@ -41,6 +41,8 @@
 
 pub mod peer;
 pub mod peers;
+#[cfg(test)]
+mod pex_tests;
 pub mod stats;
 
 use std::{
@@ -919,19 +921,25 @@ impl TorrentStateLive {
             .last();
     }
 
+    fn peer_exchange_enabled(&self) -> bool {
+        !self.metadata.info.info().private
+            && self
+                .shared
+                .session
+                .upgrade()
+                .is_some_and(|session| !session.disable_peer_exchange)
+    }
+
     async fn task_send_pex_to_peer(
         self: Arc<Self>,
         this_peer_addr: SocketAddr,
         tx: PeerTx,
     ) -> anyhow::Result<()> {
-        // As per BEP 11 we should not send more than 50 peers at once
-        // (here it also applies to fist message, should be OK as we anyhow really have more)
-        const MAX_SENT_PEERS: usize = 50;
         // As per BEP 11 recommended interval is min 60 seconds
         const PEX_MESSAGE_INTERVAL: Duration = Duration::from_secs(60);
 
-        let mut connected = Vec::with_capacity(MAX_SENT_PEERS);
-        let mut dropped = Vec::with_capacity(MAX_SENT_PEERS);
+        let mut connected = Vec::with_capacity(PEX_PEER_LIMIT);
+        let mut dropped = Vec::with_capacity(PEX_PEER_LIMIT);
         let mut peer_view_of_live_peers = HashSet::new();
 
         // Wait 10 seconds before sending the first message to assure that peer will stay with us
@@ -952,35 +960,17 @@ impl TorrentStateLive {
                 connected.clear();
                 dropped.clear();
 
-                connected.extend(
-                    live_peers
-                        .difference(&peer_view_of_live_peers)
-                        .take(MAX_SENT_PEERS)
-                        .copied(),
-                );
-                dropped.extend(
-                    peer_view_of_live_peers
-                        .difference(&live_peers)
-                        .take(MAX_SENT_PEERS)
-                        .copied(),
-                );
+                connected.extend(pex_peers_for(
+                    this_peer_addr.ip(),
+                    live_peers.difference(&peer_view_of_live_peers).copied(),
+                ));
+                dropped.extend(pex_peers_for(
+                    this_peer_addr.ip(),
+                    peer_view_of_live_peers.difference(&live_peers).copied(),
+                ));
             }
 
             trace!(connected_len = connected.len(), dropped_len = dropped.len());
-
-            let peer_ip_non_local = match this_peer_addr.ip() {
-                IpAddr::V4(a) => !a.is_loopback() && !a.is_private(),
-                IpAddr::V6(a) => !a.is_loopback() && !a.is_unique_local(),
-            };
-
-            let other_ip_is_local = |addr: &IpAddr| match addr {
-                IpAddr::V4(a) => a.is_loopback() || a.is_private(),
-                IpAddr::V6(a) => {
-                    a.is_loopback() || a.is_unicast_link_local() || a.is_unique_local()
-                }
-            };
-
-            let filter = |addr: &SocketAddr| !(peer_ip_non_local && other_ip_is_local(&addr.ip()));
 
             // BEP 11 - Dont send closed if they are now in live
             // it's assured by mutual exclusion of two  above sets  if in sent_peers_live, it cannot be in addrs_live_to_sent,
@@ -998,10 +988,32 @@ impl TorrentStateLive {
                 for addr in &dropped {
                     peer_view_of_live_peers.remove(addr);
                 }
-                peer_view_of_live_peers.extend(connected.iter().filter(|a| filter(a)).copied());
+                peer_view_of_live_peers.extend(connected.iter().copied());
             }
         }
     }
+}
+
+// BEP 11 caps each added/dropped list at 50 peers.
+const PEX_PEER_LIMIT: usize = 50;
+
+/// Local peer addresses reach only local recipients.
+/// Locality does not establish a shared LAN.
+fn pex_peers_for(
+    recipient: IpAddr,
+    peers: impl Iterator<Item = SocketAddr>,
+) -> impl Iterator<Item = SocketAddr> {
+    fn is_local(ip: IpAddr) -> bool {
+        match ip.to_canonical() {
+            IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+            IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+            }
+        }
+    }
+    peers
+        .filter(move |peer| is_local(recipient) || !is_local(peer.ip()))
+        .take(PEX_PEER_LIMIT)
 }
 
 const DEFAULT_PEER_REQUEST_WINDOW: usize = 128;
@@ -1110,7 +1122,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                 }
             }
             Message::Extended(ExtendedMessage::UtPex(pex)) => {
-                if self.state.metadata.info.info().private {
+                if !self.state.peer_exchange_enabled() {
                     warn!(
                         id = self.state.shared.id,
                         info_hash = ?self.state.shared.info_hash,
@@ -1188,7 +1200,7 @@ impl PeerConnectionHandler for &'_ PeerHandler {
             }
         }
 
-        if !self.state.metadata.info.info().private && hs.m.ut_pex.is_some() {
+        if self.state.peer_exchange_enabled() && hs.m.ut_pex.is_some() {
             spawn_with_cancel(
                 debug_span!(
                     parent: self.state.shared.span.clone(),
@@ -1241,6 +1253,9 @@ impl PeerConnectionHandler for &'_ PeerHandler {
         &self,
         handshake: &mut ExtendedHandshake<ByteBuf>,
     ) -> anyhow::Result<()> {
+        if !self.state.peer_exchange_enabled() {
+            handshake.m.ut_pex = None;
+        }
         let info_bytes = &self.state.metadata.info_bytes;
         if !info_bytes.is_empty()
             && let Ok(len) = info_bytes.len().try_into()

@@ -120,6 +120,7 @@ pub struct Session {
     reqwest_client: reqwest::Client,
     udp_tracker_client: UdpTrackerClient,
     disable_trackers: bool,
+    pub(crate) disable_peer_exchange: bool,
 
     // Lifecycle management
     cancellation_token: CancellationToken,
@@ -400,6 +401,8 @@ impl SessionPersistenceConfig {
 /// Configuration for the DHT subsystem.
 /// Set to `None` in `SessionOptions::dht` to disable DHT entirely.
 pub struct DhtSessionConfig {
+    /// Runs the DHT as a BEP 43 read-only node.
+    pub client_only: bool,
     /// Bootstrap nodes (host:port or ip:port). Uses built-in defaults if None.
     pub bootstrap_addrs: Option<Vec<String>>,
     /// The DHT listen port. Priority: this explicit port -> persisted port
@@ -415,6 +418,7 @@ pub struct DhtSessionConfig {
 impl Default for DhtSessionConfig {
     fn default() -> Self {
         Self {
+            client_only: false,
             bootstrap_addrs: None,
             port: None,
             persistence: Some(DhtPersistenceConfig::default()),
@@ -433,6 +437,9 @@ pub struct SessionOptions {
 
     /// Disable tracker communication
     pub disable_trackers: bool,
+
+    /// Disables sending, receiving and advertising the peer-exchange extension.
+    pub disable_peer_exchange: bool,
 
     /// Enable fastresume, to restore state quickly after restart.
     pub fastresume: bool,
@@ -494,6 +501,7 @@ impl Default for SessionOptions {
             dht: Some(DhtSessionConfig::default()),
             bind_device_name: None,
             disable_trackers: false,
+            disable_peer_exchange: false,
             fastresume: false,
             persistence: None,
             peer_id: None,
@@ -612,19 +620,21 @@ impl Session {
 
             let dht = if let Some(dht_config) = opts.dht.take() {
                 let dht = if let Some(persistence_config) = dht_config.persistence {
-                    PersistentDht::create(
+                    PersistentDht::create_with_query_mode(
                         persistence_config,
                         dht_config.port,
                         opts.ipv4_only,
                         dht_config.bootstrap_addrs,
                         Some(token.clone()),
                         bind_device.as_ref(),
+                        dht_config.client_only,
                     )
                     .await
                     .context("error initializing persistent DHT")?
                 } else {
                     let listen_addr = dht_listen_addr(dht_config.port, None, opts.ipv4_only);
                     DhtBuilder::with_config(DhtConfig {
+                        client_only: dht_config.client_only,
                         bootstrap_addrs: dht_config.bootstrap_addrs,
                         cancellation_token: Some(token.child_token()),
                         bind_device: bind_device.as_ref(),
@@ -811,6 +821,7 @@ impl Session {
                 ipv4_only: opts.ipv4_only,
                 trackers: opts.trackers,
                 disable_trackers: opts.disable_trackers,
+                disable_peer_exchange: opts.disable_peer_exchange,
                 peer_limit: opts.peer_limit,
                 client_name_and_version,
 

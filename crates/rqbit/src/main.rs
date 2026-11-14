@@ -632,6 +632,7 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
             Some(DhtPersistenceConfig::default())
         };
         Some(DhtSessionConfig {
+            client_only: false,
             bootstrap_addrs: opts
                 .dht_bootstrap_addrs
                 .as_ref()
@@ -643,6 +644,7 @@ async fn async_main(mut opts: Opts, cancel: CancellationToken) -> anyhow::Result
 
     let mut sopts = SessionOptions {
         dht,
+        disable_peer_exchange: false,
         // This will be overridden by "server start" below if needed.
         persistence: None,
         peer_id: None,
