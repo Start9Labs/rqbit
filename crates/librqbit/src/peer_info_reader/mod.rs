@@ -258,7 +258,39 @@ impl PeerConnectionHandler for Handler {
         false
     }
 
+    fn update_my_extended_handshake(
+        &self,
+        handshake: &mut ExtendedHandshake<ByteBuf>,
+    ) -> anyhow::Result<()> {
+        handshake.m.ut_pex = None;
+        Ok(())
+    }
+
     fn client_name_and_version(&self) -> &str {
         &self.client_name_and_version
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_handshake_does_not_advertise_peer_exchange() {
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = Handler {
+            addr: ([127, 0, 0, 1], 1).into(),
+            info_hash: Id20::new([0; 20]),
+            writer_tx,
+            result_tx: Mutex::new(None),
+            locked: RwLock::new(None),
+            client_name_and_version: String::new(),
+        };
+        let mut handshake = ExtendedHandshake::new();
+        handler
+            .update_my_extended_handshake(&mut handshake)
+            .unwrap();
+        assert_eq!(handshake.m.ut_pex, None);
+        assert!(handshake.m.ut_metadata.is_some());
     }
 }

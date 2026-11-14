@@ -1192,6 +1192,7 @@ impl DhtWorker {
                     message.version,
                     message.ip,
                     message.kind,
+                    self.dht.client_only,
                 )
                 .unwrap();
                 if let Err(e) = socket.send_to(&buf, addr).await {
@@ -1305,7 +1306,7 @@ impl DhtWorker {
 
 #[derive(Default)]
 pub struct DhtConfig<'a> {
-    /// Makes outgoing queries without serving incoming queries or relaying stored addresses.
+    /// Runs as a BEP 43 read-only node.
     pub client_only: bool,
     pub peer_id: Option<Id20>,
     pub bootstrap_addrs: Option<Vec<String>>,
@@ -1555,6 +1556,28 @@ mod tests {
         .expect("the DHT stopped answering");
         let response = bprotocol::deserialize_message::<ByteBufOwned>(&buf[..len]).unwrap();
         assert!(matches!(response.kind, MessageKind::Response(_)));
+    }
+
+    #[tokio::test]
+    async fn test_client_only_queries_are_marked_read_only() {
+        let bootstrap = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let _dht = DhtState::with_config(DhtConfig {
+            client_only: true,
+            listen_addr: Some((Ipv4Addr::LOCALHOST, 0).into()),
+            bootstrap_addrs: Some(vec![bootstrap.local_addr().unwrap().to_string()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let mut buf = [0u8; 1024];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(5), bootstrap.recv_from(&mut buf))
+            .await
+            .expect("no bootstrap query")
+            .unwrap();
+        let query = &buf[..len];
+        let message = bprotocol::deserialize_message::<ByteBufOwned>(query).unwrap();
+        assert!(matches!(message.kind, MessageKind::FindNodeRequest(_)));
+        assert!(query.windows(7).any(|w| w == &b"2:roi1e"[..]));
     }
 
     // On Windows, an ICMP port unreachable that comes back for an earlier send_to makes the next

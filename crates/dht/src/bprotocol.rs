@@ -168,6 +168,12 @@ struct RawMessage<BufT, Args = IgnoredAny, Resp = IgnoredAny> {
     version: Option<BufT>,
     #[serde(rename = "ip", skip_serializing_if = "Option::is_none")]
     ip: Option<CompactSocketAddr>,
+    #[serde(
+        rename = "ro",
+        skip_deserializing,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    read_only: bool,
 }
 
 pub struct Node<A> {
@@ -405,12 +411,14 @@ impl<BufT: ByteBufT> core::fmt::Debug for MessageKind<BufT> {
     }
 }
 
+/// A read-only node's queries carry the BEP 43 `ro` flag.
 pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
     writer: &mut W,
     transaction_id: BufT,
     version: Option<BufT>,
     ip: Option<SocketAddr>,
     kind: MessageKind<BufT>,
+    read_only: bool,
 ) -> crate::Result<()> {
     let ip = ip.map(Compact);
     match kind {
@@ -424,6 +432,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 version,
                 ip,
                 arguments: None,
+                read_only: false,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -437,6 +446,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 arguments: Some(req),
                 ip,
                 version,
+                read_only,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -450,6 +460,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 arguments: Some(req),
                 ip,
                 version,
+                read_only,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -463,6 +474,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 arguments: None,
                 ip,
                 version,
+                read_only: false,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -476,6 +488,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 arguments: Some(ping),
                 ip,
                 version,
+                read_only,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -489,6 +502,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 arguments: Some(announce),
                 ip,
                 version,
+                read_only,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
         }
@@ -635,7 +649,7 @@ mod tests {
             ip,
         } = dbg!(bprotocol::deserialize_message::<ByteBuf>(data).unwrap());
         let mut buf = Vec::new();
-        bprotocol::serialize_message(&mut buf, transaction_id, version, ip, kind).unwrap();
+        bprotocol::serialize_message(&mut buf, transaction_id, version, ip, kind, false).unwrap();
 
         if buf.as_slice() != data {
             write(&format!("{name}-serialized"), buf.as_slice());
@@ -660,6 +674,7 @@ mod tests {
                 code: 201,
                 description: ByteBuf(b"Some error"),
             }),
+            false,
         )
         .unwrap();
 
@@ -670,7 +685,7 @@ mod tests {
         } = bprotocol::deserialize_message::<ByteBuf>(&buf).unwrap();
 
         let mut buf2 = Vec::new();
-        bprotocol::serialize_message(&mut buf2, transaction_id, None, None, kind).unwrap();
+        bprotocol::serialize_message(&mut buf2, transaction_id, None, None, kind, false).unwrap();
 
         if buf.as_slice() != buf2.as_slice() {
             write("error-serialized", buf.as_slice());
@@ -720,9 +735,74 @@ mod tests {
             _ => panic!("wrong kind"),
         }
         let mut buf = Vec::new();
-        bprotocol::serialize_message(&mut buf, msg.transaction_id, msg.version, msg.ip, msg.kind)
-            .unwrap();
+        bprotocol::serialize_message(
+            &mut buf,
+            msg.transaction_id,
+            msg.version,
+            msg.ip,
+            msg.kind,
+            false,
+        )
+        .unwrap();
         assert_eq!(ann[..], buf[..]);
+    }
+
+    #[test]
+    fn read_only_queries_carry_ro_flag() {
+        let ann = b"d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer1:t2:aa1:y1:qe";
+        let msg = bprotocol::deserialize_message::<ByteBuf>(ann).unwrap();
+        let mut buf = Vec::new();
+        bprotocol::serialize_message(
+            &mut buf,
+            msg.transaction_id,
+            msg.version,
+            msg.ip,
+            msg.kind,
+            true,
+        )
+        .unwrap();
+        let read_only = b"d1:ad2:id20:abcdefghij012345678912:implied_porti1e9:info_hash20:mnopqrstuvwxyz1234564:porti6881e5:token8:aoeusnthe1:q13:announce_peer2:roi1e1:t2:aa1:y1:qe";
+        assert_eq!(read_only[..], buf[..]);
+    }
+
+    #[test]
+    fn read_only_flag_applies_to_queries_not_responses() {
+        #[derive(serde::Deserialize)]
+        struct ReadOnlyFlag {
+            ro: Option<u8>,
+        }
+        let ping = b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping1:t2:aa1:y1:qe";
+        let error = b"d1:eli201e10:Some errore1:t3:1231:y1:ee";
+        for (packet, query) in [
+            (&ping[..], true),
+            (FIND_NODE_REQUEST, true),
+            (GET_PEERS_REQUEST_0, true),
+            (FIND_NODE_RESPONSE_1, false),
+            (&error[..], false),
+        ] {
+            for read_only in [false, true] {
+                let msg = bprotocol::deserialize_message::<ByteBuf>(packet).unwrap();
+                let mut buf = Vec::new();
+                bprotocol::serialize_message(
+                    &mut buf,
+                    msg.transaction_id,
+                    msg.version,
+                    msg.ip,
+                    msg.kind,
+                    read_only,
+                )
+                .unwrap();
+                let flag: ReadOnlyFlag = bencode::from_bytes(&buf).unwrap();
+                assert_eq!(flag.ro, (query && read_only).then_some(1));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_incoming_read_only_flag_does_not_reject_a_valid_query() {
+        let ping = b"d1:ad2:id20:abcdefghij0123456789e1:q4:ping2:ro4:oops1:t2:aa1:y1:qe";
+        let msg = bprotocol::deserialize_message::<ByteBuf>(ping).unwrap();
+        assert!(matches!(msg.kind, bprotocol::MessageKind::PingRequest(_)));
     }
 
     #[test]
